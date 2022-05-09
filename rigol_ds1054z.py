@@ -1,25 +1,28 @@
-import visa
+import pyvisa as visa
 import datetime
 import time
 import re
 import csv
 from math import floor, log10
+import numpy as np
+import struct
 
 class rigol_ds1054z:
 	
 	# Constructor
 	def __init__(self, debug=False):
-		resources = visa.ResourceManager('@py')
+		resources = visa.ResourceManager()#'@py')
 		# insert your device here
 		# resources.list_resources() will show you the USB resource to put below
-		self.oscilloscope = resources.open_resource('USB0::6833::1230::DS1ZA192107675::0::INSTR')
+		#self.oscilloscope = resources.open_resource('USB0::6833::1230::DS1ZA192107675::0::INSTR')
+		self.oscilloscope = resources.open_resource('USB0::0x1AB1::0x04CE::DS1ZA182410805::INSTR')
 		self.debug = debug
 
 	def print_info(self):
 		self.oscilloscope.write('*IDN?')
 		fullreading = self.oscilloscope.read_raw()
 		readinglines = fullreading.splitlines()
-		print("Scope information: " + readinglines[0])
+		print("Scope information: " + str(readinglines[0]))
 		time.sleep(2)
 	
 	class measurement:
@@ -130,11 +133,11 @@ class rigol_ds1054z:
 		
 	def close(self):
 		self.oscilloscope.close()
-		print "Closed USB session to oscilloscope"
+		print ("Closed USB session to oscilloscope")
 		
 	def reset(self):
 		self.oscilloscope.write('*RST')
-		print "Reset oscilloscope"
+		print ("Reset oscilloscope")
 		time.sleep(8)
 		
 	# probe should either be 10.0 or 1.0, per the setting on the physical probe
@@ -221,7 +224,7 @@ class rigol_ds1054z:
 	# the int conversion is needed for scientific notation values
 	def setup_mem_depth(self, memory_depth=12e6):
 		self.oscilloscope.write(':ACQ:MDEP ' + str(int(memory_depth)))
-		print "Acquire memory depth set to %d samples" % memory_depth
+		print ("Acquire memory depth set to %d samples" % memory_depth)
 
 	def write_waveform_data(self, channel=1, filename=''):
 		self.oscilloscope.write(':WAV:SOUR: CHAN' + str(channel))
@@ -232,10 +235,10 @@ class rigol_ds1054z:
 		fullreading = self.oscilloscope.read_raw()
 		readinglines = fullreading.splitlines()
 		mdepth = int(readinglines[0])
-		num_reads = (mdepth / 15625) +1
+		num_reads = int(mdepth / 15625) +1
 		if (filename == ''):
 			filename = "rigol_waveform_data_channel_" + str(channel) + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") +".csv"
-		fid = open(filename, 'wb')
+		fid = open(filename, 'w')
 		print ("Started saving waveform data for channel " + str(channel) + " " + str(mdepth) + " samples to filename " + '\"' + filename + '\"')
 		for read_loop in range(0,num_reads):
 			self.oscilloscope.write(':WAV:DATA?')
@@ -245,6 +248,65 @@ class rigol_ds1054z:
 			reading = reading.replace(",", "\n")
 			fid.write(reading)
 		fid.close()
+    
+	def get_waveform_data(self, channel=1):
+        # read data from screen
+		self.oscilloscope.write(':WAV:MODE NORM')
+		self.oscilloscope.write(':WAV:FORM ASC')
+		time.sleep(1)
+		self.oscilloscope.write(':ACQ:MDEP?')
+		fullreading = self.oscilloscope.read_raw()
+		readinglines = fullreading.splitlines()
+		mdepth = int(readinglines[0])
+		num_reads = int(mdepth / 15625) +1
+		num_reads = 1 # loop can probably be removed, because the screen memory can be read at once?
+		self.oscilloscope.write(':WAV:SOUR CHAN' + str(channel))
+# 		self.oscilloscope.write(':WAV:SOUR?')
+# 		print(self.oscilloscope.read_raw())
+		print ("Started parsing waveform data for channel " + str(channel) + " " + str(mdepth) + " samples")
+		data = np.array([])
+		for read_loop in range(0,num_reads):
+ 			self.oscilloscope.write(':WAV:DATA?')
+ 			fullreading = self.oscilloscope.read_raw()
+ 			readinglines = fullreading.splitlines()
+ 			# np.fromstring(readinglines[0].decode()[1:], sep=',')
+ 			#reading = str(readinglines[0])
+ 			data = np.concatenate( (data, np.fromstring(readinglines[0].decode()[1:], sep=",")[1:]), axis=None)
+
+		self.oscilloscope.write(':WAV:XINC?')
+		xInc = float(self.oscilloscope.read_raw())
+		self.oscilloscope.write(':WAV:XOR?')
+		xOr = float(self.oscilloscope.read_raw())   
+		time_array = np.arange(0, len(data))*xInc+xOr
+		return (time_array, data)
+
+	def get_raw_waveform_data(self, channel=1):
+        # read data from internal memory
+        # raw mode does not reqturn the time of the trigger event...
+		self.oscilloscope.write(':WAV:PRE?')
+		pre = self.oscilloscope.read_raw()
+		(pre_format, pre_type, pre_points, pre_count, pre_xInc, pre_xOr, pre_xRef, pre_yInc, pre_yOr, pre_yRef) = np.fromstring(pre.decode(), sep=",")
+		self.oscilloscope.write(':WAV:SOUR CHAN' + str(channel))
+# 		time.sleep(1)
+		self.oscilloscope.write(':WAV:MODE RAW')
+		self.oscilloscope.write(':WAV:FORM BYTE')
+		packet_len = 1200
+		num_reads = int(pre_points / packet_len) +1
+        
+		print ("Started parsing waveform data for channel " + str(channel) + " " + str(pre_points) + " samples")
+		data = np.array([])
+		for read_loop in range(0,num_reads-1):
+ 			print(f"Load from {read_loop*packet_len+1} to {(read_loop+1)*packet_len}")
+ 			self.oscilloscope.write(':WAV:STAR ' + str(read_loop*packet_len+1))
+ 			self.oscilloscope.write(':WAV:STOP ' + str((read_loop+1)*packet_len))
+ 			self.oscilloscope.write(':WAV:DATA?')
+ 			fullreading = self.oscilloscope.read_raw()
+ 			data = np.concatenate( (data, np.frombuffer(fullreading, dtype=np.uint8)[11:-1]), axis=None)
+
+		data = (data-pre_yOr-pre_yRef)*pre_yInc # drop header and scale
+		time_array = np.arange(0, len(data))*pre_xInc+pre_xOr
+        
+		return (time_array, data)
 
 	def write_scope_settings_to_file(self, filename=''):
 		self.oscilloscope.write(':SYST:SET?')
@@ -260,7 +322,7 @@ class rigol_ds1054z:
 		
 	def restore_scope_settings_from_file(self, filename=''):
 		if (filename == ''):
-			print "ERROR: must specify filename\n"
+			print ("ERROR: must specify filename\n")
 		else:
 			with open(filename, mode='rb') as file: # b is important -> binary
 				fileContent = file.read()
