@@ -11,11 +11,22 @@ class rigol_ds1054z:
 	
 	# Constructor
 	def __init__(self, debug=False):
-		resources = visa.ResourceManager()#'@py')
+		resources = visa.ResourceManager() # use NI-VISA backend
 		# insert your device here
 		# resources.list_resources() will show you the USB resource to put below
-		#self.oscilloscope = resources.open_resource('USB0::6833::1230::DS1ZA192107675::0::INSTR')
-		self.oscilloscope = resources.open_resource('USB0::0x1AB1::0x04CE::DS1ZA182410805::INSTR')
+		# self.oscilloscope = resources.open_resource('USB0::6833::1230::DS1ZA192107675::0::INSTR')
+        
+        # try to automatically detect scope
+		res = resources.list_resources()
+		scope_string = ''
+		for element in res: 
+			if (element.find('DS1Z')>0):
+				scope_string = element
+				print("Scope found: " + str(scope_string))
+		if scope_string == '':
+			print("No scope found!")
+		self.oscilloscope = resources.open_resource(scope_string)
+        
 		self.debug = debug
 
 	def print_info(self):
@@ -286,23 +297,26 @@ class rigol_ds1054z:
 		self.oscilloscope.write(':WAV:PRE?')
 		pre = self.oscilloscope.read_raw()
 		(pre_format, pre_type, pre_points, pre_count, pre_xInc, pre_xOr, pre_xRef, pre_yInc, pre_yOr, pre_yRef) = np.fromstring(pre.decode(), sep=",")
+		print(pre_points)
 		self.oscilloscope.write(':WAV:SOUR CHAN' + str(channel))
 # 		time.sleep(1)
 		self.oscilloscope.write(':WAV:MODE RAW')
 		self.oscilloscope.write(':WAV:FORM BYTE')
-		packet_len = 1200
+		packet_len = 250000 # maximum packet length supported by scope
+		if (pre_points < packet_len):
+ 			packet_len = pre_points
 		num_reads = int(pre_points / packet_len) +1
         
 		print ("Started parsing waveform data for channel " + str(channel) + " " + str(pre_points) + " samples")
 		data = np.array([])
 		for read_loop in range(0,num_reads-1):
- 			print(f"Load from {read_loop*packet_len+1} to {(read_loop+1)*packet_len}")
+ 			print(f"Ch{channel}: {round(100*read_loop/num_reads)} % Load from {read_loop*packet_len+1} to {(read_loop+1)*packet_len}")
  			self.oscilloscope.write(':WAV:STAR ' + str(read_loop*packet_len+1))
  			self.oscilloscope.write(':WAV:STOP ' + str((read_loop+1)*packet_len))
  			self.oscilloscope.write(':WAV:DATA?')
  			fullreading = self.oscilloscope.read_raw()
  			data = np.concatenate( (data, np.frombuffer(fullreading, dtype=np.uint8)[11:-1]), axis=None)
-
+		print(f"Ch{channel}: 100% Loading done")
 		data = (data-pre_yOr-pre_yRef)*pre_yInc # drop header and scale
 		time_array = np.arange(0, len(data))*pre_xInc+pre_xOr
         
